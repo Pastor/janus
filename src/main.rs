@@ -9,6 +9,7 @@ mod highlight;
 mod i18n;
 mod indent;
 mod listing;
+mod markdown;
 mod ops;
 mod panel;
 mod preview;

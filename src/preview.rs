@@ -44,6 +44,8 @@ pub struct TextBody {
     pub numbered: bool,
     /// Файл прочитан не целиком.
     pub truncated: bool,
+    /// Оформленный вид для Markdown.
+    pub markdown: Option<crate::markdown::Doc>,
 }
 
 impl TextBody {
@@ -214,6 +216,7 @@ pub fn text_body(path: &Path, text: &str, truncated: bool) -> TextBody {
     let language = highlight::detect_text(path, &sample);
     let mut highlighter = Highlighter::new(language);
 
+    let markdown = crate::markdown::applies(path).then(|| crate::markdown::render(&raw));
     let mut lines = Vec::with_capacity(raw.len());
     let mut widths = Vec::with_capacity(raw.len());
     for line in raw {
@@ -227,6 +230,7 @@ pub fn text_body(path: &Path, text: &str, truncated: bool) -> TextBody {
         language: language.map(|l| l.name),
         numbered: language.is_some_and(|l| l.numbered()),
         truncated,
+        markdown,
     }
 }
 
@@ -444,6 +448,20 @@ mod tests {
         };
         assert!(text.language.is_none());
         assert!(!text.numbered);
+        assert!(text.markdown.is_none());
+    }
+
+    #[test]
+    fn markdown_gets_rendered_view() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("README.md");
+        fs::write(&path, "# Title\n\n**bold** text\n").unwrap();
+        let Body::Text(text) = build(&path, &never).body else {
+            panic!();
+        };
+        let doc = text.markdown.expect("ожидалось оформление");
+        assert_eq!(doc.lines[0].plain(), "Title");
+        assert_eq!(doc.lines.last().unwrap().plain(), "bold text");
     }
 
     #[test]

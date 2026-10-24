@@ -747,7 +747,12 @@ impl App {
             KeyCode::End => viewer.end(),
             KeyCode::Left => viewer.hscroll(-(HSCROLL_STEP as isize)),
             KeyCode::Right => viewer.hscroll(HSCROLL_STEP as isize),
-            KeyCode::Char('w') => viewer.toggle_wrap(),
+            // У Markdown `w` переключает оформление, у остального — перенос.
+            KeyCode::Char('w') => {
+                if !viewer.toggle_rendered() {
+                    viewer.toggle_wrap();
+                }
+            }
             KeyCode::Char('e') => self.start_editing(),
             KeyCode::Char('/') => {
                 viewer.start_search();
@@ -772,7 +777,7 @@ impl App {
             self.fail(text);
             return;
         }
-        let (path, top) = (content.path.clone(), viewer.top);
+        let (path, top) = (content.path.clone(), viewer.source_top());
         if in_archive(&path) {
             let text = self.text().archive_readonly;
             self.fail(text);

@@ -135,6 +135,15 @@ scroll, `w` toggles soft wrap (`←` `→` shift the text when wrap is off),
 `/` searches the text as you type (the match is centered, `←` `→` go to the
 previous / next one with a `3/17` counter), `e` opens the editor, `p` / `Esc` close.
 
+For Markdown files (`.md`, `.markdown`) `w` switches between the source and a
+rendered preview instead of wrapping: headings without `#`, bullets and
+numbered lists, task boxes, block quotes, tables with aligned columns (cells
+wrap inside their column when the table is wider than the panel), code blocks
+highlighted by their language, bold / italic / strikethrough, inline code and
+links. Paragraphs are reflowed to the panel width by words. The same place of
+the document stays on screen when switching, search works on the rendered text,
+and the mode stays on for other Markdown files while the preview is open.
+
 ![Preview with search](docs/media/en/preview.png)
 
 **Highlighting** is done by an own line-based lexer:
@@ -378,7 +387,7 @@ input it is just a letter.
 | `l` | Largest objects |
 | `o` / `?` | Settings / help |
 
-**Preview:** `Tab` focus, `↑↓ PgUp PgDn` scroll, `←→` shift, `w` wrap, `/` search,
+**Preview:** `Tab` focus, `↑↓ PgUp PgDn` scroll, `←→` shift, `w` wrap (Markdown — rendered / source), `/` search,
 `e` edit, `Esc` close.
 **Editor:** `Ctrl+S` save, `Esc` close, `Tab` / `Shift+Tab` indent,
 `Home`, `Ctrl+Home` / `Ctrl+End`.

@@ -3,15 +3,16 @@
 use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::Side;
-use crate::highlight::Piece;
+use crate::highlight::{Piece, Token};
 use crate::i18n::Text;
 use crate::listing::{Entry, Kind};
+use crate::markdown as md;
 use crate::ops::Progress;
 use crate::preview::{Body, DirInfo, Preview, TextBody};
 use crate::search::Kind as SearchKind;
@@ -547,7 +548,8 @@ fn viewer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if viewer.content.is_some() {
         hints.push(("↑↓", t.hint_scroll));
     }
-    if text && !viewer.wrap {
+    let rendered = viewer.doc().is_some();
+    if text && !viewer.wrap && !rendered {
         hints.push(("←→", t.hint_shift));
     }
     if text
@@ -558,8 +560,14 @@ fn viewer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     {
         hints.push(("e", t.hint_edit));
     }
-    if text {
+    if rendered {
+        hints.push(("w", t.hint_source));
+    } else if viewer.can_render() {
+        hints.push(("w", t.hint_render));
+    } else if text {
         hints.push(("w", t.hint_wrap));
+    }
+    if text {
         hints.push(("/", t.hint_search));
     }
     hints.push(("Tab", t.hint_panel));
@@ -1561,6 +1569,12 @@ fn draw_viewer(frame: &mut Frame, area: Rect, app: &mut App, side: Side) {
 
     // Сначала предел прокрутки — от него зависит, с какой строки рисовать.
     let lines = match &content.body {
+        Body::Text(_) if viewer.doc().is_some() => {
+            let doc = viewer.doc().unwrap();
+            let max_top = doc_max_top(doc, rows, width, &theme);
+            viewer.fit(rows, max_top);
+            doc_rows(viewer, rows, width, &theme, t)
+        }
         Body::Text(text) => {
             let max_top = text_max_top(text, rows, text_avail(text, width), viewer.wrap);
             viewer.fit(rows, max_top);
@@ -1605,7 +1619,10 @@ fn viewer_info(viewer: &Viewer, t: &Text) -> String {
             if text.truncated {
                 parts.push(t.truncated.to_string());
             }
-            if viewer.wrap {
+            if let Some(doc) = viewer.doc() {
+                parts[2] = format!("{} {}", doc.lines.len(), t.lines);
+                parts.push(t.rendered.to_string());
+            } else if viewer.wrap {
                 parts.push(t.wrap.to_string());
             }
             parts
@@ -1727,16 +1744,288 @@ fn styled_cells(
             p.text.chars().map(move |c| (c, style))
         })
         .collect();
-    if let Some(search) = search {
-        let current = search.current();
-        for m in search.in_line(line) {
-            let style = theme.found(current == Some(*m));
-            for cell in cells.iter_mut().skip(m.start).take(m.len) {
-                cell.1 = cell.1.patch(style);
-            }
+    mark_found(&mut cells, line, search, theme);
+    cells
+}
+
+/// Отмечает в строке найденный текст.
+fn mark_found(cells: &mut [Cell], line: usize, search: Option<&Search>, theme: &Theme) {
+    let Some(search) = search else {
+        return;
+    };
+    let current = search.current();
+    for m in search.in_line(line) {
+        let style = theme.found(current == Some(*m));
+        for cell in cells.iter_mut().skip(m.start).take(m.len) {
+            cell.1 = cell.1.patch(style);
         }
     }
-    cells
+}
+
+/// Стиль фрагмента оформленного Markdown.
+fn md_style(seg: &md::Seg, theme: &Theme) -> Style {
+    let mut style = match seg.kind {
+        md::Kind::Plain => Style::default(),
+        md::Kind::Heading(1) => theme
+            .token(Token::Keyword)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        md::Kind::Heading(2) => theme.token(Token::Keyword).add_modifier(Modifier::BOLD),
+        md::Kind::Heading(_) => theme.token(Token::Type).add_modifier(Modifier::BOLD),
+        md::Kind::Code => theme.token(Token::Str),
+        md::Kind::Link => theme.token(Token::Type).add_modifier(Modifier::UNDERLINED),
+        md::Kind::Quote => theme.token(Token::Comment).add_modifier(Modifier::ITALIC),
+        md::Kind::Marker => theme.dim(),
+        md::Kind::Syntax(token) => theme.token(token),
+    };
+    if seg.strong {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if seg.emph {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if seg.strike {
+        style = style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    style
+}
+
+fn md_cells(segs: &[md::Seg], theme: &Theme) -> Vec<Cell> {
+    segs.iter()
+        .flat_map(|s| {
+            let style = md_style(s, theme);
+            s.text.chars().map(move |c| (c, style))
+        })
+        .collect()
+}
+
+/// Экранные строки строки документа шириной `width`.
+fn doc_line_rows(
+    line: &md::Line,
+    index: usize,
+    width: usize,
+    search: Option<&Search>,
+    theme: &Theme,
+) -> Vec<Vec<Cell>> {
+    if let Some(row) = &line.row {
+        return table_rows(line, row, index, width, search, theme);
+    }
+    let mut cells = md_cells(&line.segs, theme);
+    mark_found(&mut cells, index, search, theme);
+    if let Some(ch) = line.rule {
+        let used: usize = cells.iter().map(|c| c.0.width().unwrap_or(0)).sum();
+        cells.extend(std::iter::repeat_n(
+            (ch, theme.dim()),
+            width.saturating_sub(used),
+        ));
+        return vec![cells];
+    }
+    let mut cont = md_cells(&line.cont, theme);
+    let cont_width: usize = cont.iter().map(|c| c.0.width().unwrap_or(0)).sum();
+    // Отступ, съедающий почти всю ширину, не повторяется.
+    if cont_width * 2 > width {
+        cont.clear();
+    }
+    wrap_words(&cells, &cont, width)
+}
+
+/// Перенос по словам: строка режется по последнему пробелу, влезающему
+/// в ширину; слово длиннее строки режется посимвольно. Продолжения
+/// начинаются с `cont`.
+fn wrap_words(cells: &[Cell], cont: &[Cell], width: usize) -> Vec<Vec<Cell>> {
+    if width == 0 {
+        return vec![Vec::new()];
+    }
+    let w = |c: &Cell| c.0.width().unwrap_or(0);
+    let mut rows = Vec::new();
+    let mut row: Vec<Cell> = Vec::new();
+    let mut used = 0;
+    // Сколько ячеек в начале строки занимает отступ продолжения.
+    let mut lead = 0;
+    let mut i = 0;
+    while i < cells.len() {
+        let cell = cells[i];
+        if used + w(&cell) <= width || row.len() == lead {
+            row.push(cell);
+            used += w(&cell);
+            i += 1;
+            continue;
+        }
+        // Не влез пробел — строка кончается здесь; не влезла буква — слово
+        // целиком уходит на следующую строку, если перед ним был пробел.
+        let carry = match row[lead..].iter().rposition(|c| c.0 == ' ') {
+            Some(p) if cell.0 != ' ' && p > 0 => {
+                let tail = row.split_off(lead + p + 1);
+                row.pop();
+                tail
+            }
+            _ => Vec::new(),
+        };
+        rows.push(std::mem::take(&mut row));
+        let carried: usize = carry.iter().map(w).sum();
+        let indent: usize = cont.iter().map(w).sum();
+        if indent + carried <= width {
+            row.extend_from_slice(cont);
+        }
+        lead = row.len();
+        row.extend(carry);
+        used = row.iter().map(w).sum();
+        // Пробелы в начале перенесённой строки не нужны.
+        while row.len() == lead && cells.get(i).is_some_and(|c| c.0 == ' ') {
+            i += 1;
+        }
+    }
+    // Хвост из одних пробелов не даёт пустой строки.
+    if row.len() > lead || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// Ширина колонок таблицы в `avail` колонок экрана вместе с разделителями:
+/// узкие колонки получают сколько им нужно, остальное поровну делят широкие.
+fn column_widths(natural: &[usize], avail: usize) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut avail = avail.saturating_sub(md::COLUMN_GAP.width() * (n - 1));
+    if natural.iter().sum::<usize>() <= avail {
+        return natural.to_vec();
+    }
+    let mut out = vec![0; n];
+    let mut open: Vec<usize> = (0..n).collect();
+    while !open.is_empty() {
+        let share = avail / open.len();
+        let (fit, rest): (Vec<usize>, Vec<usize>) =
+            open.iter().partition(|&&c| natural[c] <= share);
+        if fit.is_empty() {
+            let extra = avail % rest.len();
+            for (k, &c) in rest.iter().enumerate() {
+                out[c] = share + usize::from(k < extra);
+            }
+            break;
+        }
+        for &c in &fit {
+            out[c] = natural[c];
+            avail -= natural[c];
+        }
+        open = rest;
+    }
+    out.into_iter().map(|w| w.max(1)).collect()
+}
+
+/// Экранные строки строки таблицы: текст ячейки переносится внутри колонки.
+fn table_rows(
+    line: &md::Line,
+    row: &md::Row,
+    index: usize,
+    width: usize,
+    search: Option<&Search>,
+    theme: &Theme,
+) -> Vec<Vec<Cell>> {
+    let w = |cells: &[Cell]| {
+        cells
+            .iter()
+            .map(|c| c.0.width().unwrap_or(0))
+            .sum::<usize>()
+    };
+    let prefix = md_cells(&line.segs, theme);
+    let widths = column_widths(&row.table.widths, width.saturating_sub(w(&prefix)));
+    let gap: Vec<Cell> = md::COLUMN_GAP.chars().map(|c| (c, theme.dim())).collect();
+    if row.cells.is_empty() {
+        let border: Vec<String> = widths.iter().map(|&w| "─".repeat(w)).collect();
+        let mut out = prefix;
+        out.extend(border.join("─┼─").chars().map(|c| (c, theme.dim())));
+        return vec![out];
+    }
+    // Совпадения поиска считаются по строке целиком, как её даёт `plain`.
+    let mut flat = prefix.clone();
+    let mut spans = Vec::with_capacity(row.cells.len());
+    for (c, cell) in row.cells.iter().enumerate() {
+        if c > 0 {
+            flat.extend_from_slice(&gap);
+        }
+        let start = flat.len();
+        flat.extend(md_cells(cell, theme));
+        spans.push(start..flat.len());
+    }
+    mark_found(&mut flat, index, search, theme);
+    let wrapped: Vec<Vec<Vec<Cell>>> = spans
+        .into_iter()
+        .zip(&widths)
+        .map(|(span, &w)| wrap_words(&flat[span], &[], w))
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+    let last = widths.len().saturating_sub(1);
+    (0..height)
+        .map(|r| {
+            let mut out = prefix.clone();
+            for (c, &cw) in widths.iter().enumerate() {
+                if c > 0 {
+                    out.extend_from_slice(&gap);
+                }
+                let part = wrapped[c].get(r).map_or(&[][..], Vec::as_slice);
+                let room = cw.saturating_sub(w(part));
+                let align = row.table.aligns.get(c).copied().unwrap_or(md::Align::Left);
+                let (left, right) = match align {
+                    md::Align::Left => (0, room),
+                    md::Align::Right => (room, 0),
+                    md::Align::Center => (room / 2, room - room / 2),
+                };
+                let blank = (' ', Style::default());
+                out.extend(std::iter::repeat_n(blank, left));
+                out.extend_from_slice(part);
+                // Последней колонке хвост из пробелов не нужен.
+                if c < last {
+                    out.extend(std::iter::repeat_n(blank, right));
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// Наибольшая первая строка документа, при которой его конец у низа экрана.
+fn doc_max_top(doc: &md::Doc, rows: usize, width: usize, theme: &Theme) -> usize {
+    let mut used = 0;
+    let mut first = doc.lines.len();
+    while first > 0 {
+        let h = doc_line_rows(&doc.lines[first - 1], first - 1, width, None, theme).len();
+        if used + h > rows {
+            break;
+        }
+        used += h;
+        first -= 1;
+    }
+    first
+}
+
+/// Видимые строки оформленного Markdown.
+fn doc_rows<'a>(
+    viewer: &Viewer,
+    rows: usize,
+    width: usize,
+    theme: &Theme,
+    t: &Text,
+) -> Vec<Line<'a>> {
+    let Some(doc) = viewer.doc() else {
+        return Vec::new();
+    };
+    if doc.lines.is_empty() {
+        return vec![Line::styled(t.empty_file.to_string(), theme.dim())];
+    }
+    let mut out = Vec::with_capacity(rows);
+    let mut i = viewer.top;
+    while out.len() < rows && i < doc.lines.len() {
+        for chunk in doc_line_rows(&doc.lines[i], i, width, viewer.search.as_ref(), theme) {
+            if out.len() >= rows {
+                break;
+            }
+            out.push(Line::from(group_cells(chunk)));
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Режет строку на куски шириной не больше `avail`. Широкий символ, не
@@ -2289,6 +2578,87 @@ mod tests {
         let sliced: String = slice_cells(&cells, 3, 10).iter().map(|c| c.0).collect();
         assert_eq!(sliced, " 本c");
         assert_eq!(wrap_cells(&[], 5).len(), 1);
+    }
+
+    #[test]
+    fn wrap_words_breaks_at_spaces_and_indents() {
+        let cells = |s: &str| s.chars().map(|c| (c, Style::default())).collect::<Vec<_>>();
+        let text = |rows: Vec<Vec<Cell>>| -> Vec<String> {
+            rows.into_iter()
+                .map(|r| r.into_iter().map(|c| c.0).collect())
+                .collect()
+        };
+        let rows = wrap_words(&cells("• one two three"), &cells("  "), 9);
+        assert_eq!(text(rows), ["• one two", "  three"]);
+        // Слово длиннее строки режется посимвольно.
+        let rows = wrap_words(&cells("abcdefghij"), &[], 4);
+        assert_eq!(text(rows), ["abcd", "efgh", "ij"]);
+        assert_eq!(text(wrap_words(&cells("ab"), &[], 0)), [""]);
+    }
+
+    #[test]
+    fn table_columns_shrink_to_fit() {
+        assert_eq!(column_widths(&[3, 10], 80), [3, 10]);
+        // 30 колонок минус разделитель: узкая целиком, широкая — остаток.
+        assert_eq!(column_widths(&[5, 60], 30), [5, 22]);
+        assert_eq!(column_widths(&[40, 60], 23), [10, 10]);
+        assert_eq!(column_widths(&[], 10), Vec::<usize>::new());
+
+        let theme = Theme {
+            depth: crate::ui::theme::ColorDepth::True,
+            name: crate::ui::theme::ThemeName::Dark,
+        };
+        let doc = md::render(&[
+            "| Key | Action |",
+            "|--:|--|",
+            "| q | quit the program now |",
+        ]);
+        let text = |i: usize, width| -> Vec<String> {
+            doc_line_rows(&doc.lines[i], i, width, None, &theme)
+                .into_iter()
+                .map(|r| r.into_iter().map(|c| c.0).collect())
+                .collect()
+        };
+        assert_eq!(text(0, 20), ["Key │ Action"]);
+        assert_eq!(text(1, 20), ["────┼───────────────"]);
+        // Ячейка переносится внутри колонки, выравнивание сохраняется.
+        assert_eq!(text(2, 20), ["  q │ quit the", "    │ program now"]);
+    }
+
+    #[test]
+    fn frame_markdown_rendered_by_w() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("README.md"),
+            "# Janus\n\nA **fast** two-panel file manager for the terminal.\n\n- one\n- two\n",
+        )
+        .unwrap();
+        let mut app = App::new_for_test(tmp.path());
+        let key = |c| ratatui::crossterm::event::KeyEvent::from(c);
+        use ratatui::crossterm::event::KeyCode;
+        app.on_key(key(KeyCode::Enter));
+        crate::ui::tests::wait_preview(&mut app);
+        let lines = screen(&mut app, 80, 12);
+        assert!(lines[1].contains("# Janus"), "{}", lines[1]);
+        assert!(lines[11].contains("w render"), "{}", lines[11]);
+
+        app.on_key(key(KeyCode::Char('w')));
+        let lines = screen(&mut app, 80, 12);
+        println!("{}", lines.join("\n"));
+        assert!(lines[1].contains("│Janus "), "{}", lines[1]);
+        assert!(lines[2].contains("════"), "{}", lines[2]);
+        // Абзац перенесён по словам в ширину правой панели.
+        assert!(
+            lines[4].ends_with("│A fast two-panel file manager for the │"),
+            "{}",
+            lines[4]
+        );
+        assert!(lines[5].contains("│terminal."), "{}", lines[5]);
+        assert!(lines[7].contains("│• one"), "{}", lines[7]);
+        assert!(lines[10].contains("rendered"), "{}", lines[10]);
+        assert!(lines[11].contains("w source"), "{}", lines[11]);
+        // Перенос строк при этом не тронут.
+        assert!(app.viewer.as_ref().unwrap().wrap);
     }
 
     #[test]

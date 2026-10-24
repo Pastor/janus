@@ -46,7 +46,7 @@ pub fn sections(t: &'static Text) -> Vec<Section> {
                 ("p", t.help_preview),
                 ("↑↓ PgUp PgDn", t.hint_scroll),
                 ("←→", t.help_shift),
-                ("w", t.hint_wrap),
+                ("w", t.help_wrap),
                 ("/", t.help_view_search),
                 ("e", t.hint_edit),
                 ("Esc", t.hint_close),

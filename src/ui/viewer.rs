@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use crate::config::Side;
+use crate::markdown::Doc;
 use crate::preview::{Body, Preview};
 use crate::search::Needle;
 
@@ -62,6 +63,9 @@ pub struct Viewer {
     /// Сдвиг по горизонтали в колонках (только без переноса).
     pub left: usize,
     pub wrap: bool,
+    /// Показывать Markdown оформленным, а не исходником. Действует на все
+    /// файлы, которые пройдут через просмотр, пока он открыт.
+    pub rendered: bool,
     /// Высота области на последнем кадре.
     pub rows: usize,
     /// Наибольшая допустимая `top` на последнем кадре.
@@ -83,6 +87,7 @@ impl Viewer {
             top: 0,
             left: 0,
             wrap,
+            rendered: false,
             rows: 1,
             max_top: 0,
             search: None,
@@ -99,6 +104,61 @@ impl Viewer {
         self.left = 0;
         self.search = None;
         self.pending = None;
+    }
+
+    /// Оформленный документ, если он сейчас показан вместо исходника.
+    pub fn doc(&self) -> Option<&Doc> {
+        if !self.rendered {
+            return None;
+        }
+        match self.content.as_ref().map(|c| &c.body) {
+            Some(Body::Text(text)) => text.markdown.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Можно ли показать файл оформленным.
+    pub fn can_render(&self) -> bool {
+        matches!(
+            self.content.as_ref().map(|c| &c.body),
+            Some(Body::Text(text)) if text.markdown.is_some()
+        )
+    }
+
+    /// Переключает оформление Markdown, оставляя на виду то же место.
+    /// `false` — для этого файла оформления нет.
+    pub fn toggle_rendered(&mut self) -> bool {
+        if !self.can_render() {
+            return false;
+        }
+        let source = self.source_top();
+        self.rendered = !self.rendered;
+        self.top = self.doc().map_or(source, |doc| doc.line_of(source));
+        self.left = 0;
+        // Совпадения считались по другим строкам.
+        if let Some(query) = self.search.take().map(|s| s.query) {
+            self.search = Some(Search::default());
+            let top = self.top;
+            self.set_query(query);
+            self.top = top;
+        }
+        true
+    }
+
+    /// Строка исходника, которая сейчас наверху.
+    pub fn source_top(&self) -> usize {
+        self.doc().map_or(self.top, |doc| doc.to_source(self.top))
+    }
+
+    /// Показанные строки без разметки — по ним идёт поиск.
+    fn plain_lines(&self) -> Option<Vec<String>> {
+        if let Some(doc) = self.doc() {
+            return Some(doc.lines.iter().map(|l| l.plain()).collect());
+        }
+        let Some(Body::Text(text)) = self.content.as_ref().map(|c| &c.body) else {
+            return None;
+        };
+        Some((0..text.lines.len()).map(|i| text.plain(i)).collect())
     }
 
     /// Принимает результат загрузчика, если он ответ на последний запрос.
@@ -124,6 +184,7 @@ impl Viewer {
             return;
         }
         self.set_query(query.to_string());
+        let line = self.doc().map_or(line, |doc| doc.line_of(line));
         if let Some(search) = &mut self.search
             && let Some(i) = search.matches.iter().position(|m| m.line >= line)
         {
@@ -187,11 +248,10 @@ impl Viewer {
     /// Новый текст запроса: совпадения пересчитываются, и показывается первое
     /// из них, начиная с текущего положения.
     pub fn set_query(&mut self, query: String) {
-        let Some(Body::Text(text)) = self.content.as_ref().map(|c| &c.body) else {
+        let Some(lines) = self.plain_lines() else {
             return;
         };
-        let lines = (0..text.lines.len()).map(|i| text.plain(i));
-        let matches = find_all(lines, &query);
+        let matches = find_all(lines.into_iter(), &query);
         let from = self.top;
         let current = matches.iter().position(|m| m.line >= from).unwrap_or(0);
         let target = matches.get(current).map(|m| m.line);
@@ -356,6 +416,53 @@ mod tests {
         assert_eq!(viewer.left, 0);
         viewer.hscroll(16);
         assert_eq!(viewer.left, 16);
+    }
+
+    fn markdown_viewer(text: &str, rows: usize) -> Viewer {
+        let mut viewer = Viewer::new(Side::Right, true);
+        viewer.show(PathBuf::from("/x.md"), 1);
+        let body = text_body(Path::new("/x.md"), text, false);
+        viewer.loaded(
+            1,
+            Preview {
+                path: PathBuf::from("/x.md"),
+                size: 0,
+                modified: None,
+                mode: String::new(),
+                owner: String::new(),
+                body: Body::Text(body),
+            },
+        );
+        viewer.fit(rows, 1000);
+        viewer
+    }
+
+    #[test]
+    fn rendered_markdown_keeps_position_and_search() {
+        let mut viewer = markdown_viewer("# Top\n\nintro\n\n## Part\n\none\ntwo\n", 10);
+        assert!(viewer.doc().is_none());
+        viewer.start_search();
+        viewer.set_query("Part".into());
+        // Наверху строка «## Part» исходника.
+        viewer.top = 4;
+        assert!(viewer.toggle_rendered());
+        let doc = viewer.doc().unwrap();
+        assert_eq!(doc.lines[viewer.top].plain(), "Part");
+        assert_eq!(viewer.source_top(), 4);
+        // Поиск пересчитан по оформленным строкам.
+        let m = viewer.search.as_ref().unwrap().current().unwrap();
+        assert_eq!((m.line, m.start), (viewer.top, 0));
+        assert!(viewer.toggle_rendered());
+        assert_eq!(viewer.top, 4);
+        assert!(viewer.search.as_ref().unwrap().current().unwrap().start == 3);
+    }
+
+    #[test]
+    fn plain_text_cannot_be_rendered() {
+        let mut viewer = viewer_with("# not markdown", 10);
+        assert!(!viewer.can_render());
+        assert!(!viewer.toggle_rendered());
+        assert!(!viewer.rendered);
     }
 
     #[test]
