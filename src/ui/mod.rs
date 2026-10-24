@@ -67,36 +67,21 @@ pub enum Mode {
     Drives(DrivesForm),
     /// Переименование элемента под курсором.
     Rename(RenameForm),
+    /// Создание директории или файла в директории активной панели.
+    Create(CreateForm),
 }
 
-/// Форма переименования: строка ввода с курсором.
-pub struct RenameForm {
-    /// Что переименовываем.
-    pub source: PathBuf,
-    /// Новое имя.
+/// Строка ввода имени с курсором.
+pub struct NameInput {
     pub name: String,
     /// Позиция курсора в символах (не в байтах) от начала имени.
     pub cursor: usize,
 }
 
-impl RenameForm {
-    /// Курсор ставится перед расширением: чаще всего меняют имя, а не тип.
-    /// У директорий и имён вроде `.gitignore` — в конец.
-    pub fn new(source: PathBuf, is_dir: bool) -> Self {
-        let name = source
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let len = name.chars().count();
-        let cursor = match name.rfind('.') {
-            Some(dot) if !is_dir && dot > 0 => name[..dot].chars().count(),
-            _ => len,
-        };
-        Self {
-            source,
-            name,
-            cursor,
-        }
+impl NameInput {
+    /// Строка с курсором в позиции `cursor`.
+    fn new(name: String, cursor: usize) -> Self {
+        Self { name, cursor }
     }
 
     /// Байтовое смещение курсора в строке.
@@ -134,6 +119,43 @@ impl RenameForm {
         }
         true
     }
+}
+
+/// Форма переименования: строка ввода с курсором.
+pub struct RenameForm {
+    /// Что переименовываем.
+    pub source: PathBuf,
+    /// Новое имя.
+    pub input: NameInput,
+}
+
+impl RenameForm {
+    /// Курсор ставится перед расширением: чаще всего меняют имя, а не тип.
+    /// У директорий и имён вроде `.gitignore` — в конец.
+    pub fn new(source: PathBuf, is_dir: bool) -> Self {
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let len = name.chars().count();
+        let cursor = match name.rfind('.') {
+            Some(dot) if !is_dir && dot > 0 => name[..dot].chars().count(),
+            _ => len,
+        };
+        Self {
+            source,
+            input: NameInput::new(name, cursor),
+        }
+    }
+}
+
+/// Форма создания: пустая строка ввода для имени новой директории или файла.
+pub struct CreateForm {
+    /// Где создаём.
+    pub dir: PathBuf,
+    /// Директория (`m`) или файл (`n`).
+    pub is_dir: bool,
+    pub input: NameInput,
 }
 
 /// Окно выбора диска.
@@ -325,6 +347,7 @@ impl App {
             Mode::Settings(_) => return self.on_settings_key(key.code),
             Mode::Drives(_) => return self.on_drives_key(key.code),
             Mode::Rename(_) => return self.on_rename_key(key.code),
+            Mode::Create(_) => return self.on_create_key(key.code),
         }
         // Редактор сам разбирает сочетания с Ctrl.
         if self.editor.is_some() {
@@ -355,7 +378,7 @@ impl App {
     /// Сейчас вводится текст: буквы — это текст, а не команды.
     fn typing(&self) -> bool {
         match self.mode {
-            Mode::Pack(_) | Mode::Rename(_) => true,
+            Mode::Pack(_) | Mode::Rename(_) | Mode::Create(_) => true,
             Mode::Normal => {
                 self.editor.is_some()
                     || self.finder.is_some()
@@ -473,7 +496,7 @@ impl App {
             KeyCode::Char('.') => self.toggle_hidden(),
             KeyCode::Char(' ') => self.active_panel().toggle_mark(),
             KeyCode::Char('c') => self.start_transfer(Transfer::Copy),
-            KeyCode::Char('m') => self.start_transfer(Transfer::Move),
+            KeyCode::Char('v') => self.start_transfer(Transfer::Move),
             KeyCode::Char('d') => self.ask_delete(!self.cfg.use_trash),
             KeyCode::Char('D') => self.ask_delete(true),
             KeyCode::Char('a') => self.ask_pack(),
@@ -486,6 +509,8 @@ impl App {
             KeyCode::Char('o') => self.open_settings(),
             KeyCode::Char('g') => self.open_drives(),
             KeyCode::Char('r') | KeyCode::F(2) => self.ask_rename(),
+            KeyCode::Char('m') => self.ask_create(true),
+            KeyCode::Char('n') => self.ask_create(false),
             _ => {}
         }
     }
@@ -1251,10 +1276,10 @@ impl App {
                 let Mode::Rename(form) = std::mem::replace(&mut self.mode, Mode::Normal) else {
                     return;
                 };
-                self.rename(form.source, form.name);
+                self.rename(form.source, form.input.name);
             }
             code => {
-                form.edit(code);
+                form.input.edit(code);
             }
         }
     }
@@ -1268,13 +1293,7 @@ impl App {
         if old.as_deref() == Some(name.as_str()) {
             return;
         }
-        // Разделитель пути превратил бы переименование в перенос.
-        let bad = name.is_empty()
-            || name == "."
-            || name == ".."
-            || name.contains('/')
-            || (cfg!(windows) && name.contains(['\\', ':', '*', '?', '"', '<', '>', '|']));
-        if bad {
+        if !valid_name(&name) {
             self.fail(format!("{}: {name}", t.rename_invalid));
             return;
         }
@@ -1297,6 +1316,74 @@ impl App {
         let side = self.active;
         self.panel_mut(side).select_name(&name);
         self.info(format!("{}: {name}", t.renamed));
+    }
+
+    /// Открывает форму создания директории (`is_dir`) или файла в директории
+    /// активной панели.
+    fn ask_create(&mut self, is_dir: bool) {
+        let dir = self.panel(self.active).dir.clone();
+        if in_archive(&dir) {
+            let text = self.text().archive_readonly;
+            self.fail(text);
+            return;
+        }
+        self.mode = Mode::Create(CreateForm {
+            dir,
+            is_dir,
+            input: NameInput::new(String::new(), 0),
+        });
+    }
+
+    /// Клавиши формы создания: правка имени, Enter — создать, Esc — отмена.
+    fn on_create_key(&mut self, code: KeyCode) {
+        let Mode::Create(form) = &mut self.mode else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => {
+                let Mode::Create(form) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+                    return;
+                };
+                self.create(form);
+            }
+            code => {
+                form.input.edit(code);
+            }
+        }
+    }
+
+    /// Создаёт пустую директорию или файл и ставит на него курсор. Существующее
+    /// не затирается, ошибка сообщается в строке состояния.
+    fn create(&mut self, form: CreateForm) {
+        let t = self.text();
+        let name = form.input.name.trim().to_string();
+        if !valid_name(&name) {
+            self.fail(format!("{}: {name}", t.rename_invalid));
+            return;
+        }
+        let target = form.dir.join(&name);
+        if std::fs::symlink_metadata(&target).is_ok() {
+            self.fail(format!("{}: {name}", t.rename_exists));
+            return;
+        }
+        let made = if form.is_dir {
+            std::fs::create_dir(&target)
+        } else {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+                .map(drop)
+        };
+        if let Err(err) = made {
+            self.fail(format!("{}: {err}", t.create_failed));
+            return;
+        }
+        self.refresh_panels();
+        let side = self.active;
+        self.panel_mut(side).select_name(&name);
+        self.info(format!("{}: {name}", t.created));
     }
 
     /// Открывает форму создания архива для выделенного или элемента под курсором.
@@ -1662,6 +1749,16 @@ fn main_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<(
     }
 }
 
+/// Имя годится для элемента в директории. Разделитель пути превратил бы
+/// переименование в перенос, а создание — в создание в другом месте.
+fn valid_name(name: &str) -> bool {
+    !(name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || (cfg!(windows) && name.contains(['\\', ':', '*', '?', '"', '<', '>', '|'])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1815,7 +1912,7 @@ mod tests {
     fn move_without_marks_takes_item_under_cursor() {
         let (tmp, mut app) = two_dirs();
         press(&mut app, KeyCode::Down); // a
-        press(&mut app, KeyCode::Char('m'));
+        press(&mut app, KeyCode::Char('v'));
         finish(&mut app, KeyCode::Esc);
         assert!(!tmp.path().join("left/a").exists());
         assert!(tmp.path().join("right/a").exists());
@@ -1854,7 +1951,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("f"), "").unwrap();
         let mut app = app_in(tmp.path());
-        press(&mut app, KeyCode::Char('m'));
+        press(&mut app, KeyCode::Char('v'));
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.status.as_ref().unwrap().text.contains("same directory"));
     }
@@ -2631,11 +2728,11 @@ mod tests {
     #[test]
     fn rename_cursor_stops_before_extension() {
         let form = RenameForm::new(PathBuf::from("/x/report.tar.gz"), false);
-        assert_eq!(form.cursor, "report.tar".len());
+        assert_eq!(form.input.cursor, "report.tar".len());
         let form = RenameForm::new(PathBuf::from("/x/.gitignore"), false);
-        assert_eq!(form.cursor, ".gitignore".len());
+        assert_eq!(form.input.cursor, ".gitignore".len());
         let form = RenameForm::new(PathBuf::from("/x/v1.2"), true);
-        assert_eq!(form.cursor, "v1.2".len());
+        assert_eq!(form.input.cursor, "v1.2".len());
     }
 
     #[test]
@@ -2668,7 +2765,7 @@ mod tests {
             let Mode::Rename(form) = &mut app.mode else {
                 panic!("ожидалась форма переименования");
             };
-            form.name = name.to_string();
+            form.input.name = name.to_string();
             press(&mut app, KeyCode::Enter);
             assert!(app.status.as_ref().is_some_and(|s| s.error), "{name}");
         }
@@ -2684,5 +2781,57 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal));
         assert!(tmp.path().join("report.txt").is_file());
+    }
+
+    #[test]
+    fn create_makes_directory_and_file_under_cursor() {
+        let (tmp, mut app) = rename_dir();
+        press(&mut app, KeyCode::Char('m'));
+        assert!(matches!(
+            app.mode,
+            Mode::Create(CreateForm { is_dir: true, .. })
+        ));
+        // Кириллица в поле ввода — текст, а не команда в чужой раскладке.
+        type_text(&mut app, "новая");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(tmp.path().join("новая").is_dir());
+        assert_eq!(app.panel(app.active).current().unwrap().name, "новая");
+
+        press(&mut app, KeyCode::Char('n'));
+        type_text(&mut app, "notes.md");
+        press(&mut app, KeyCode::Enter);
+        let file = tmp.path().join("notes.md");
+        assert!(file.is_file());
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+        assert_eq!(app.panel(app.active).current().unwrap().name, "notes.md");
+    }
+
+    #[test]
+    fn create_refuses_existing_and_invalid_names() {
+        let (tmp, mut app) = rename_dir();
+        for (key, name) in [
+            ('n', "taken.txt"),
+            ('m', "taken.txt"),
+            ('m', "a/b"),
+            ('n', " "),
+        ] {
+            press(&mut app, KeyCode::Char(key));
+            type_text(&mut app, name);
+            press(&mut app, KeyCode::Enter);
+            assert!(app.status.as_ref().is_some_and(|s| s.error), "{name}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("taken.txt")).unwrap(),
+            "y"
+        );
+        assert!(!tmp.path().join("a").exists());
+
+        // Esc ничего не создаёт.
+        press(&mut app, KeyCode::Char('m'));
+        type_text(&mut app, "zzz");
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(!tmp.path().join("zzz").exists());
     }
 }

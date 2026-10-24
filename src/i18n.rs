@@ -218,6 +218,17 @@ pub struct Text {
     pub rename_failed: &'static str,
     pub renamed: &'static str,
 
+    // Создание директории и файла.
+    pub hint_mkdir: &'static str,
+    pub hint_mkfile: &'static str,
+    pub help_mkdir: &'static str,
+    pub help_mkfile: &'static str,
+    pub mkdir_title: &'static str,
+    pub mkfile_title: &'static str,
+    pub create_in: &'static str,
+    pub create_failed: &'static str,
+    pub created: &'static str,
+
     // Справка и настройки.
     pub hint_help: &'static str,
     pub hint_settings: &'static str,
@@ -428,6 +439,16 @@ pub static EN: Text = Text {
     rename_failed: "cannot rename",
     renamed: "renamed to",
 
+    hint_mkdir: "new dir",
+    hint_mkfile: "new file",
+    help_mkdir: "create a directory",
+    help_mkfile: "create an empty file",
+    mkdir_title: "New directory",
+    mkfile_title: "New file",
+    create_in: "in",
+    create_failed: "cannot create",
+    created: "created",
+
     hint_help: "help",
     hint_settings: "settings",
     hint_change: "change",
@@ -636,6 +657,16 @@ pub static RU: Text = Text {
     rename_exists: "уже существует",
     rename_failed: "не удалось переименовать",
     renamed: "новое имя",
+
+    hint_mkdir: "папка",
+    hint_mkfile: "файл",
+    help_mkdir: "создать директорию",
+    help_mkfile: "создать пустой файл",
+    mkdir_title: "Новая директория",
+    mkfile_title: "Новый файл",
+    create_in: "в",
+    create_failed: "не удалось создать",
+    created: "создано",
 
     hint_help: "справка",
     hint_settings: "настройки",

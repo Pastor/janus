@@ -66,6 +66,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Settings(form) => draw_settings(frame, main, form.field, app),
         Mode::Drives(form) => draw_drives(frame, main, form, &app.theme, app.text()),
         Mode::Rename(form) => draw_rename(frame, main, form, &app.theme, app.text()),
+        Mode::Create(form) => draw_create(frame, main, form, &app.theme, app.text()),
     }
 }
 
@@ -460,6 +461,7 @@ fn mode_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         Mode::Settings(_) => settings_hints(t),
         Mode::Drives(_) => drives_hints(t),
         Mode::Rename(_) => rename_hints(t),
+        Mode::Create(form) => create_hints(form.is_dir, t),
         Mode::ConfirmDelete { permanent, .. } => vec![
             (if *permanent { "D" } else { "d" }, t.confirm),
             ("Esc q", t.cancel),
@@ -498,7 +500,7 @@ fn files_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     }
     if can_transfer {
         hints.push(("c", t.hint_copy));
-        hints.push(("m", t.hint_move_to));
+        hints.push(("v", t.hint_move_to));
     }
     if has {
         hints.push(("d", t.hint_delete));
@@ -522,6 +524,10 @@ fn files_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     hints.push(("o", t.hint_settings));
     hints.push(("q", t.hint_quit));
     // Последними: в узком окне уступают место выходу, полный список — в справке.
+    if here_writable {
+        hints.push(("m", t.hint_mkdir));
+        hints.push(("n", t.hint_mkfile));
+    }
     hints.push((".", t.hint_hidden));
     hints.push(("g", t.hint_drives));
     hints
@@ -694,24 +700,76 @@ fn draw_rename(
     theme: &Theme,
     t: &'static Text,
 ) {
-    let inner = dialog_inner(area);
     let old = form
         .source
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let chars: Vec<char> = form.name.chars().collect();
+    let hints = rename_hints(t);
+    draw_name_input(
+        frame,
+        area,
+        t.rename_title,
+        &old,
+        &form.input,
+        &hints,
+        theme,
+    );
+}
+
+/// Клавиши формы создания.
+fn create_hints(is_dir: bool, t: &'static Text) -> Vec<(&'static str, &'static str)> {
+    let what = if is_dir { t.hint_mkdir } else { t.hint_mkfile };
+    vec![("Enter", what), ("Esc", t.cancel)]
+}
+
+/// Форма создания директории или файла: где создаём и строка ввода.
+fn draw_create(
+    frame: &mut Frame,
+    area: Rect,
+    form: &crate::ui::CreateForm,
+    theme: &Theme,
+    t: &'static Text,
+) {
+    let title = if form.is_dir {
+        t.mkdir_title
+    } else {
+        t.mkfile_title
+    };
+    let place = format!("{} {}", t.create_in, form.dir.display());
+    let hints = create_hints(form.is_dir, t);
+    draw_name_input(frame, area, title, &place, &form.input, &hints, theme);
+}
+
+/// Окно со строкой ввода имени: пояснение сверху, строка с курсором, подсказки.
+/// Длинное имя прокручивается так, чтобы курсор оставался виден.
+fn draw_name_input(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    label: &str,
+    input: &crate::ui::NameInput,
+    hints: &[(&'static str, &'static str)],
+    theme: &Theme,
+) {
+    let inner = dialog_inner(area);
+    let chars: Vec<char> = input.name.chars().collect();
     // Сколько символов уходит за левый край, чтобы курсор влез в строку.
     let room = inner.saturating_sub(1).max(1);
     let mut start = 0;
-    while chars[start..form.cursor].iter().collect::<String>().width() >= room {
+    while chars[start..input.cursor]
+        .iter()
+        .collect::<String>()
+        .width()
+        >= room
+    {
         start += 1;
     }
-    let before: String = chars[start..form.cursor].iter().collect();
+    let before: String = chars[start..input.cursor].iter().collect();
     let under: String = chars
-        .get(form.cursor)
+        .get(input.cursor)
         .map_or(" ".to_string(), char::to_string);
-    let after: String = chars.iter().skip(form.cursor + 1).collect();
+    let after: String = chars.iter().skip(input.cursor + 1).collect();
     let after = fit(
         &after,
         "",
@@ -719,7 +777,7 @@ fn draw_rename(
     );
     let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
     let body = vec![
-        Line::styled(fit(&old, "", inner), theme.dim()),
+        Line::styled(fit(label, "", inner), theme.dim()),
         Line::raw(""),
         Line::from(vec![
             Span::styled(before, bold),
@@ -727,9 +785,9 @@ fn draw_rename(
             Span::styled(after, bold),
         ]),
         Line::raw(""),
-        hint_line(&rename_hints(t), inner, theme),
+        hint_line(hints, inner, theme),
     ];
-    dialog(frame, area, t.rename_title, body, theme.border(true), theme);
+    dialog(frame, area, title, body, theme.border(true), theme);
 }
 
 /// Клавиши окна дисков.

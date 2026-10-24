@@ -192,7 +192,7 @@ the search.
 
 - `Space` marks a file and moves the cursor down; the bottom border shows the
   number and total size of the marked files.
-- `c` copies and `m` moves the marked files (or the one under the cursor) into the
+- `c` copies and `v` moves the marked files (or the one under the cursor) into the
   directory of the other panel. A progress dialog is shown; `Esc` cancels.
 - On a name conflict you choose: `r` replace, `s` skip, `R` replace all,
   `S` skip all, `Esc` cancel.
@@ -221,6 +221,16 @@ the search.
 - Archives are read-only, so renaming inside an open archive is not allowed.
 
 ![Rename dialog](docs/media/en/rename.png)
+
+## New directory and file
+
+`m` creates a directory, `n` creates an empty file in the directory of the active panel.
+
+- The dialog shows where the item will be created and an empty input line; editing
+  keys are the same as in rename. `Enter` creates, `Esc` cancels.
+- The cursor moves to the new item.
+- An existing name is never overwritten; invalid names are rejected the same way
+  as in rename. Inside an open archive creating is not allowed.
 
 ## Archives
 
@@ -275,7 +285,7 @@ The cursor starts on the drive that contains the current directory.
 ## Help, hints and settings
 
 The bottom line shows only keys that will do something right now (for example,
-`c` / `m` appear only when there is somewhere to copy). If they don't fit,
+`c` / `v` appear only when there is somewhere to copy). If they don't fit,
 hints take two lines; whatever still doesn't fit becomes `…`.
 
 `?` opens the full help with all keys grouped by mode, `o` opens the settings.
@@ -358,8 +368,9 @@ input it is just a letter.
 | Key | Action |
 |---|---|
 | `Space` | Mark |
-| `c` / `m` | Copy / move to the other panel |
+| `c` / `v` | Copy / move to the other panel |
 | `r` `F2` | Rename |
+| `m` / `n` | New directory / new empty file |
 | `d` / `D` | Delete to trash / permanently |
 | `a` | Create an archive |
 | `p` | Preview |
